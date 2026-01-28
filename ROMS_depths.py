@@ -5,26 +5,107 @@ __date__           = "August 2017"
 __email__          = "ddauhajre@atmos.ucla.edu"
 __python_version__ = "2.7.9"
 
-'''
+"""
 PYTHON LIBRARY OF FUNCTIONS TO 
 CONVERT SIGMA LEVELS TO DEPTHS OF A ROMS
 GRID BASED ON OUTPUT (i.e., free surface)
-'''
+"""
 ######################################
 
 import numpy as np
 from netCDF4 import Dataset
 
+import numpy as np
+
+import numpy as np
+
+def get_zr_loop(nc_roms, nc_grd, tind=None):
+    """
+    GET DEPTHS reading zeta directly from nc_roms
+    for all or select time steps in given ROMS output nc_roms
+    
+    nc_roms --> single netcdf file with roms output
+    nc_grd  --> single netcdf file of roms grid
+    tind    --> (Optional) Time index. 
+                If None, computes for ALL times (returns 4D).
+                If Integer, computes for that step (returns 3D).
+    """
+    # ----------------------------------------
+    # 1. GET ATTRIBUTES
+    # ----------------------------------------
+    hc      = getattr(nc_roms, 'hc')      if hasattr(nc_roms, 'hc')      else nc_roms.variables['hc'][:]
+    theta_s = getattr(nc_roms, 'theta_s') if hasattr(nc_roms, 'theta_s') else nc_roms.variables['theta_s'][:]
+    theta_b = getattr(nc_roms, 'theta_b') if hasattr(nc_roms, 'theta_b') else nc_roms.variables['theta_b'][:]
+    
+    # Get N from dimensions
+    if 's_rho' in nc_roms.dimensions:
+        N = len(nc_roms.dimensions['s_rho'])
+    else:
+        N = nc_roms.variables['s_rho'].shape[0]
+
+    # Get Grid H
+    h = nc_grd.variables['h'][:]
+    [Ly, Lx] = h.shape
+
+    # Set Vertical Transformation params (defaulting to your values)
+    Vtrans = 2
+    Vstret = 4
+    if 'Vtransform' in nc_roms.variables:
+        Vtrans = nc_roms.variables['Vtransform'][:]
+    if 'Vstretching' in nc_roms.variables:
+        Vstret = nc_roms.variables['Vstretching'][:]
+
+    # ----------------------------------------
+    # 2. GET ZETA AND COMPUTE
+    # ----------------------------------------
+    
+    # CASE A: Single Time Step (3D Output)
+    if tind is not None:
+        zeta = np.squeeze(nc_roms.variables['zeta'][tind,:,:])
+        
+        # Your original set_depth call logic
+        # Note: We assume set_depth is available in your namespace
+        z_r = set_depth(Vtrans, Vstret, theta_s, theta_b, hc, N, 1, h, zeta).T
+        return np.swapaxes(z_r, 1, 2)
+
+    # CASE B: All Time Steps (4D Output)
+    else:
+        zeta_all = nc_roms.variables['zeta'][:] # Shape: [Time, Y, X]
+        Nt = zeta_all.shape[0]
+        
+        # Pre-allocate array [Time, N, Y, X] 
+        # (Assuming your swapaxes logic results in [N, Y, X] or [N, X, Y])
+        # Based on your return: swapaxes(T, 1, 2)
+        # If set_depth returns [x,y,z], .T -> [z,y,x], swap -> [z,x,y] or similar.
+        # We will dynamically determine shape from the first iteration to be safe.
+        
+        print(f"Calculating depths for {Nt} time steps using set_depth...")
+        
+        # Process first step to determine output shape
+        z_0 = set_depth(Vtrans, Vstret, theta_s, theta_b, hc, N, 1, h, zeta_all[0,:,:]).T
+        z_0 = np.swapaxes(z_0, 1, 2)
+        
+        # Allocate 4D array
+        z_4d = np.zeros((Nt, *z_0.shape))
+        z_4d[0,:,:,:] = z_0
+        
+        # Loop for the rest
+        for t in range(1, Nt):
+            print(str(t)+' of '+str(Nt))
+            z_t = set_depth(Vtrans, Vstret, theta_s, theta_b, hc, N, 1, h, zeta_all[t,:,:]).T
+            z_4d[t,:,:,:] = np.swapaxes(z_t, 1, 2)
+            
+        return z_4d
 
 def get_zr_zw_tind(nc_roms, nc_grd, tind, dim_bounds):
-    '''
+    """
     GET DEPTHS FOR A SPECIFIC netcdf ROMS output file
 
     nc_roms --> single netcdf file with roms output
     nc_grd  --> single netcdf file of roms grid
     tind    --> time index 
     dim_bounds   ---> [eta_0, eta_1, xi_0, xi_1] list of spatial bounds
-    '''
+    """
     #######################
     #DECLARE DEPTH ARRAY
     ######################
@@ -66,13 +147,167 @@ def get_zr_zw_tind(nc_roms, nc_grd, tind, dim_bounds):
     return np.swapaxes(z_r,1,2), np.swapaxes(z_w,1,2)
     ##########################################################
 
+def get_zr_zeta_tind(nc_roms, nc_grd, tind):
+    """
+    GET DEPTHS FOR A SPECIFIC netcdf ROMS output file
+
+    nc_roms --> single netcdf file with roms output
+    nc_grd  --> single netcdf file of roms grid
+    tind    --> time index 
+    """
+    #######################
+    #DECLARE DEPTH ARRAY
+    ######################
+    #ACCESS GLOBAL ATTRIBUES
+    hc      = getattr(nc_roms, 'hc')
+    theta_s = getattr(nc_roms, 'theta_s')
+    theta_b = getattr(nc_roms, 'theta_b')
+    N       = len(nc_roms.dimensions['s_rho'])
+
+    nt = len(nc_roms.dimensions['time'])
+    [Ly_all,Lx_all] = nc_grd.variables['pm'].shape
+    
+    z_r = np.zeros([N,Ly_all,Lx_all])
+    
+    ####################################
+    # SET DEPTH CALCULATION ATTRIBUTES
+    #####################################
+   
+    # SEE CODE IN set_depth() for documentation on these values
+    Vtrans  = 2
+    Vstret = 4
+    
+    #BOTTOM TOPOGRAPHY
+    h = nc_grd.variables['h']
+
+    zeta = np.squeeze(nc_roms.variables['zeta'][tind,:,:])
+    z_r = set_depth(Vtrans, Vstret, theta_s, theta_b, hc, N, 1, h, zeta).T
+   
+    return np.swapaxes(z_r,1,2)
+    ##########################################################
+
+def get_zw_zeta_tind(nc_roms, nc_grd, tind):
+    """
+    GET DEPTHS FOR A SPECIFIC netcdf ROMS output file
+
+    nc_roms --> single netcdf file with roms output
+    nc_grd  --> single netcdf file of roms grid
+    tind    --> time index 
+    """
+    #######################
+    #DECLARE DEPTH ARRAY
+    ######################
+    #ACCESS GLOBAL ATTRIBUES
+    hc      = getattr(nc_roms, 'hc')
+    theta_s = getattr(nc_roms, 'theta_s')
+    theta_b = getattr(nc_roms, 'theta_b')
+    N       = len(nc_roms.dimensions['s_rho'])
+
+    nt = len(nc_roms.dimensions['time'])
+    [Ly_all,Lx_all] = nc_grd.variables['pm'].shape
+    
+    z_w = np.zeros([N,Ly_all,Lx_all])
+    
+    ####################################
+    # SET DEPTH CALCULATION ATTRIBUTES
+    #####################################
+   
+    # SEE CODE IN set_depth() for documentation on these values
+    Vtrans  = 2
+    Vstret = 4
+    
+    #BOTTOM TOPOGRAPHY
+    h = nc_grd.variables['h']
+
+    zeta = np.squeeze(nc_roms.variables['zeta'][tind,:,:])
+    z_w = set_depth(Vtrans, Vstret, theta_s, theta_b, hc, N, 5, h, zeta).T
+   
+    return np.swapaxes(z_w,1,2)
+    ##########################################################
+
+def get_zr_zeta(nc_roms, nc_grd, nc_zeta):
+    """
+    GET DEPTHS FOR A SPECIFIC netcdf ROMS output file
+    useful for average depth over time given an average zeta
+
+    nc_roms --> single netcdf file with roms output
+    nc_grd  --> single netcdf file of roms grid
+    nc_zeta --> single zeta variable [x,y]
+    """
+    #######################
+    #DECLARE DEPTH ARRAY
+    ######################
+    #ACCESS GLOBAL ATTRIBUES
+    hc      = getattr(nc_roms, 'hc')
+    theta_s = getattr(nc_roms, 'theta_s')
+    theta_b = getattr(nc_roms, 'theta_b')
+    N       = len(nc_roms.dimensions['s_rho'])
+
+    [Ly_all,Lx_all] = nc_grd.variables['pm'].shape
+    
+    z_r = np.zeros([N,Ly_all,Lx_all])
+    
+    ####################################
+    # SET DEPTH CALCULATION ATTRIBUTES
+    #####################################
+   
+    # SEE CODE IN set_depth() for documentation on these values
+    Vtrans  = 2
+    Vstret = 4
+    
+    #BOTTOM TOPOGRAPHY
+    h = nc_grd.variables['h']
+
+    z_r = set_depth(Vtrans, Vstret, theta_s, theta_b, hc, N, 1, h, nc_zeta).T
+   
+    return np.swapaxes(z_r,1,2)
+    ##########################################################
+
+def get_zw_zeta(nc_roms, nc_grd, nc_zeta):
+    """
+    GET DEPTHS FOR A SPECIFIC netcdf ROMS output file
+    useful for average depth over time given an average zeta
+
+    nc_roms --> single netcdf file with roms output
+    nc_grd  --> single netcdf file of roms grid
+    nc_zeta --> single zeta variable [x,y]
+    """
+    #######################
+    #DECLARE DEPTH ARRAY
+    ######################
+    #ACCESS GLOBAL ATTRIBUES
+    hc      = getattr(nc_roms, 'hc')
+    theta_s = getattr(nc_roms, 'theta_s')
+    theta_b = getattr(nc_roms, 'theta_b')
+    N       = len(nc_roms.dimensions['s_rho'])
+
+    [Ly_all,Lx_all] = nc_grd.variables['pm'].shape
+    
+    z_r = np.zeros([N,Ly_all,Lx_all])
+    
+    ####################################
+    # SET DEPTH CALCULATION ATTRIBUTES
+    #####################################
+   
+    # SEE CODE IN set_depth() for documentation on these values
+    Vtrans  = 2
+    Vstret = 4
+    
+    #BOTTOM TOPOGRAPHY
+    h = nc_grd.variables['h']
+
+    z_w = set_depth(Vtrans, Vstret, theta_s, theta_b, hc, N, 5, h, nc_zeta).T
+   
+    return np.swapaxes(z_w,1,2)
+    ##########################################################
+
 def get_zr_L2grid(nc_grd):
-    '''
+    """
     GET DEPTHS FOR A SPECIFIC netcdf ROMS output file
     ASSUMES ZETA EQUALS 0 EVERYWHERE
 
     nc_grd  --> single netcdf file of roms grid
-    '''
+    """
     #######################
     #DECLARE DEPTH ARRAY
     ######################
@@ -104,15 +339,15 @@ def get_zr_L2grid(nc_grd):
     ##########################################################
 
 
-def get_zr_tind(nc_roms, nc_grd, tind, dim_bounds):
-    '''
+def get_zs_tind(nc_roms, nc_grd, tind, dim_bounds):
+    """
     GET DEPTHS FOR A SPECIFIC netcdf ROMS output file
 
     nc_roms --> single netcdf file with roms output
     nc_grd  --> single netcdf file of roms grid
     tind    --> time index 
     dim_bounds   ---> [eta_0, eta_1, xi_0, xi_1] list of spatial bounds
-    '''
+    """
     #######################
     #DECLARE DEPTH ARRAY
     ######################
@@ -151,14 +386,14 @@ def get_zr_tind(nc_roms, nc_grd, tind, dim_bounds):
     ##########################################################
 
 def get_zs3d(nc_roms,nc_grd,dim_bounds,varname,igrid=1):
-    '''
+    """
     GET DEPTHS FOR A SPECIFIC netcdf ROMS output file
 
     nc_roms --> single netcdf file with roms output
     nc_grd  --> single netcdf file of roms grid
     tind    --> time index 
     dim_bounds   ---> [eta_0, eta_1, xi_0, xi_1] list of spatial bounds
-    '''
+    """
     #######################
     #DECLARE DEPTH ARRAY
     ######################
@@ -194,7 +429,7 @@ def get_zs3d(nc_roms,nc_grd,dim_bounds,varname,igrid=1):
     return np.swapaxes(z_r,1,2)
     ##########################################################
 
-'''
+"""
 def get_zs(nc_roms, nc_grd, levs, dim_bounds, igrid=1):
     
     #GET DEPTHS FOR A SPECIFIC netcdf ROMS output file
@@ -246,18 +481,15 @@ def get_zs(nc_roms, nc_grd, levs, dim_bounds, igrid=1):
         for k in range(nlevs):
             z[n,k,:,:] = z_temp[:,:,levs[k]]
     return z
+"""
     ##########################################################
-'''
-
 	######################################
 	# BELOW: FUNCTIONS BY CIGDEM AKA
 	# FOR DEPTH CONVERSION
 	#######################################
 
-
-
 """
- Given a batymetry (h), free-surface (zeta) and terrain-following
+Given a batymetry (h), free-surface (zeta) and terrain-following
  parameters, this function computes the 3D depths for the requested
  C-grid location. If the free-surface is not provided, a zero value
  is assumed resulting in unperturb depths.  This function can be
@@ -403,8 +635,8 @@ def set_depth( Vtr, Vstr, thts, thtb, hc, N, igrid, h, zeta ):
 
     return z
     ###################################
-"""
 
+"""
  STRETCHING:  Compute ROMS vertical coordinate stretching function
 
  [s,C]=stretching(Vstretching, theta_s, theta_b, hc, N, kgrid, report)
@@ -437,8 +669,9 @@ def set_depth( Vtr, Vstr, thts, thtb, hc, N, igrid, h, zeta ):
                     vertical RHO- or W-points (vector)
     C             Nondimensional, monotonic, vertical stretching function,
                     C(s), 1D array, [-1 <= C(s) <= 0]
-
 """
+
+
 import pylab as pl
 
 def stretching(Vstr, thts, thtb, hc, N, kgrid):
